@@ -1,0 +1,18 @@
+[package]
+name = "changelog-roller"
+version = "0.1.0"
+edition = "2021"
+
+# See https://doc.rust-lang.org/cargo/reference/profiles.html for more about
+# these build profiles.
+[profile.dev]
+# Prevent 36GB target/debug directories.
+debug = false
+
+[profile.release]
+debug = false
+# Disable in CI using CARGO_INCREMENTAL=0.
+incremental = true
+
+[dependencies]
+clap = { version = "4.5.32", features = ["derive"] }

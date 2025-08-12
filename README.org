@@ -1,0 +1,61 @@
+#+title:     Changelog Roller
+#+author:    Logan Barnett
+#+email:     logustus@gmail.com
+#+date:      <2025-03-20 Thu>
+#+language:  en
+#+file_tags:
+#+tags:
+
+A simple ~CHANGELOG~ roller.  Moves ~Upcoming~ to your newly released version,
+and creates a new ~Upcoming~ section.
+
+Currently only supports ~org-mode~ files, but could support Markdown in the
+future.
+
+* Introduction
+
+~changelog-roller~ is a simple tool that provides a staging area for upcoming
+changes (defaults to ~Upcoming~ as a heading).  As changes roll in, authors of
+the change log add meaningful changes to the ~Upcoming~ heading.  When the
+release time is right, invoke ~changelog-roller~ with a new version.  This will
+effectively change the ~Upcoming~ section to be that new version, and emit a
+new, blank ~Upcoming~ section to stage new changes upon.
+
+* Example
+
+Assume a ~CHANGELOG.org~ document like this:
+
+#+begin_src org :results none :exports code
+,* changelog
+,** Upcoming
+,*** Breaking
+1. Removed important feature ~shiny~!
+,*** Additions
+,*** Fixes
+,** v0.1.0
+,*** Breaking
+,*** Additions
+1. Lots of new features!
+,*** Fixes
+#+end_src
+
+Then run ~changelog-roller --input-file CHANGELOG.org --add-version v0.2.0~ and
+observe the new document:
+
+#+begin_src org :results none :exports code
+,* changelog
+,** Upcoming
+,*** Breaking
+,*** Additions
+,*** Fixes
+,** v0.2.0
+,*** Breaking
+1. Removed important feature ~shiny~!
+,*** Additions
+,*** Fixes
+,** v0.1.0
+,*** Breaking
+,*** Additions
+1. Lots of new features!
+,*** Fixes
+#+end_src
