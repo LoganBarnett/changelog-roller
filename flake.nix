@@ -1,53 +1,154 @@
 {
-  description = "";
+  description = "changelog-roller - Roll CHANGELOG files automatically";
   inputs = {
-    nixpkgs.url = github:NixOS/nixpkgs/nixpkgs-unstable;
+    # LLM: Do NOT change this URL unless explicitly directed. This is the
+    # correct format for nixpkgs stable (25.11 is correct, not nixos-25.11).
+    nixpkgs.url = "github:NixOS/nixpkgs/25.11";
     rust-overlay.url = "github:oxalica/rust-overlay";
+    crane.url = "github:ipetkov/crane";
   };
 
-  outputs = { self, nixpkgs, rust-overlay }@inputs: let
-    packages = (pkgs: let
+  outputs = { self, nixpkgs, rust-overlay, crane }@inputs: let
+    forAllSystems = nixpkgs.lib.genAttrs nixpkgs.lib.systems.flakeExposed;
+    overlays = [
+      (import rust-overlay)
+    ];
+    pkgsFor = system: import nixpkgs {
+      inherit system;
+      overlays = overlays;
+    };
+
+    # ============================================================================
+    # WORKSPACE CRATES CONFIGURATION
+    # ============================================================================
+    workspaceCrates = {
+      # CRATE:cli:begin
+      # CLI application
+      cli = {
+        name = "changelog-roller";
+        binary = "changelog-roller";
+        description = "CHANGELOG roller CLI";
+      };
+      # CRATE:cli:end
+    };
+
+    # Development shell packages.
+    devPackages = pkgs: let
       rust = pkgs.rust-bin.stable.latest.default.override {
         extensions = [
           # For rust-analyzer and others.  See
           # https://nixos.wiki/wiki/Rust#Shell.nix_example for some details.
           "rust-src"
           "rust-analyzer"
-          "rustfmt-preview"
+          "rustfmt"
         ];
       };
     in [
-      pkgs.cargo-sweep
-      pkgs.clang
-      pkgs.cargo
-      pkgs.openssl
-      pkgs.libssh2
-      # To help with finding openssl.
-      pkgs.pkg-config
       rust
-      pkgs.rustfmt
-      pkgs.rustup
-    ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-      pkgs.darwin.apple_sdk.frameworks.Security
-      pkgs.darwin.apple_sdk.frameworks.CoreFoundation
-      pkgs.darwin.apple_sdk.frameworks.CoreServices
-      pkgs.darwin.apple_sdk.frameworks.IOKit
-    ]);
+      pkgs.cargo-sweep
+      pkgs.pkg-config
+      pkgs.openssl
+      pkgs.jq
+    ];
   in {
 
-    devShells.aarch64-darwin.default = let
-      system = "aarch64-darwin";
-      overlays = [
-        (import rust-overlay)
-      ];
-      pkgs = import nixpkgs {
-        inherit overlays system;
+    devShells = forAllSystems (system: let
+      pkgs = pkgsFor system;
+    in {
+      default = pkgs.mkShell {
+        buildInputs = devPackages pkgs;
+        shellHook = ''
+          echo "changelog-roller development environment"
+          echo ""
+          echo "Available Cargo packages (use 'cargo build -p <name>'):"
+          cargo metadata --no-deps --format-version 1 2>/dev/null | \
+            jq -r '.packages[].name' | \
+            sort | \
+            sed 's/^/  • /' || echo "  Run 'cargo init' to get started"
+
+          # Symlink cargo-husky hooks into .git/hooks/ using paths relative
+          # to .git/hooks/ so the repo stays valid after moves or copies.
+          _git_root=$(git rev-parse --show-toplevel 2>/dev/null)
+          if [ -n "$_git_root" ] && [ -d ".cargo-husky/hooks" ]; then
+            for _hook in .cargo-husky/hooks/*; do
+              [ -x "$_hook" ] || continue
+              _name=$(basename "$_hook")
+              _dest="$_git_root/.git/hooks/$_name"
+              _target=$(${pkgs.coreutils}/bin/realpath --relative-to="$_git_root/.git/hooks" "$(pwd)/$_hook")
+              if [ ! -L "$_dest" ] || [ "$(readlink "$_dest")" != "$_target" ]; then
+                ln -sf "$_target" "$_dest"
+                echo "Installed git hook: $_name -> $_target"
+              fi
+            done
+          fi
+        '';
       };
-    in pkgs.mkShell {
-      buildInputs = (packages pkgs);
-      shellHook = ''
-      '';
-    };
+    });
+
+    # ============================================================================
+    # PACKAGES
+    # ============================================================================
+    packages = forAllSystems (system: let
+      pkgs = pkgsFor system;
+      craneLib = (crane.mkLib pkgs).overrideToolchain (p: p.rust-bin.stable.latest.default);
+
+      # Common build arguments shared by all crates
+      commonArgs = {
+        src = craneLib.cleanCargoSource ./.;
+        # LLM: Do NOT add darwin.apple_sdk.frameworks here - they were removed
+        # in nixpkgs 25.11+. Use libiconv for Darwin builds instead.
+        buildInputs = with pkgs; [
+          openssl
+        ] ++ pkgs.lib.optionals pkgs.stdenv.isDarwin (with pkgs.darwin; [
+          libiconv
+        ]);
+        nativeBuildInputs = with pkgs; [
+          pkg-config
+        ];
+        # Run only unit tests (--lib --bins), skip integration tests in tests/ directories
+        # Integration tests may require external services not available in Nix sandbox
+        # Full test suite can be run locally with 'cargo test --all'
+        cargoTestExtraArgs = "--lib --bins";
+      };
+
+      # Build individual crate packages from workspaceCrates.  When a
+      # per-crate file exists under nix/packages/, it is used instead of
+      # the generic crane build; this lets individual crates carry custom
+      # build options without cluttering the top-level flake.
+      cratePackages = pkgs.lib.mapAttrs (key: crate:
+        let pkgFile = ./. + "/nix/packages/${key}.nix";
+        in if builtins.pathExists pkgFile
+          then import pkgFile { inherit craneLib commonArgs; }
+          else craneLib.buildPackage (commonArgs // {
+            pname = crate.name;
+            cargoExtraArgs = "-p ${crate.name}";
+          })
+      ) workspaceCrates;
+
+    in cratePackages // {
+      default = craneLib.buildPackage (commonArgs // { pname = "changelog-roller"; });
+    });
+
+    # ============================================================================
+    # APPS
+    # ============================================================================
+    apps = forAllSystems (system: let
+      pkgs = pkgsFor system;
+    in pkgs.lib.mapAttrs (key: crate: {
+      type = "app";
+      program = "${self.packages.${system}.${key}}/bin/${crate.binary}";
+    }) workspaceCrates);
+
+    # ============================================================================
+    # OVERLAYS
+    # ============================================================================
+    # Uncomment to expose your packages as an overlay
+    # ============================================================================
+    # overlays.default = final: prev:
+    #   pkgs.lib.mapAttrs' (key: crate:
+    #     pkgs.lib.nameValuePair crate.name self.packages.${final.stdenv.hostPlatform.system}.${key}
+    #   ) workspaceCrates;
 
   };
+
 }
