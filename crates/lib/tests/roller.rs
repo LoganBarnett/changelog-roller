@@ -1,4 +1,6 @@
-use changelog_roller_lib::{is_ready_to_roll, roll, RollError};
+use changelog_roller_lib::{
+  has_upcoming_additions, is_ready_to_roll, roll, RollError,
+};
 use orgize::Org;
 
 // Returns the immediate child headline titles for the first headline whose
@@ -255,4 +257,146 @@ fn ready_to_roll_respects_custom_upcoming_heading() {
   assert!(is_ready_to_roll(input, "Next").unwrap());
   // The default "Upcoming" name is absent — should return an error, not false.
   assert!(is_ready_to_roll(input, "Upcoming").is_err());
+}
+
+// ============================================================================
+// has_upcoming_additions
+// ============================================================================
+
+#[test]
+fn diff_range_detects_new_entry() {
+  let base = "* changelog\n** Upcoming\n*** Additions\n";
+  let head = "* changelog\n** Upcoming\n*** Additions\n1. Brand new thing\n";
+  assert!(has_upcoming_additions(base, head, "Upcoming"));
+}
+
+#[test]
+fn diff_range_no_addition_when_head_same_as_base() {
+  let input = "* changelog\n** Upcoming\n*** Additions\n1. Already there\n";
+  assert!(!has_upcoming_additions(input, input, "Upcoming"));
+}
+
+#[test]
+fn diff_range_no_addition_when_head_is_subset_of_base() {
+  let base =
+    "* changelog\n** Upcoming\n*** Additions\n1. Already there\n1. Another\n";
+  let head = "* changelog\n** Upcoming\n*** Additions\n1. Already there\n";
+  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+}
+
+#[test]
+fn diff_range_true_when_base_has_no_upcoming() {
+  let base = "* changelog\n** v0.1.0\n*** Additions\n1. Initial\n";
+  let head = "* changelog\n** Upcoming\n*** Additions\n1. New thing\n** v0.1.0\n*** Additions\n1. Initial\n";
+  assert!(has_upcoming_additions(base, head, "Upcoming"));
+}
+
+#[test]
+fn diff_range_false_when_both_have_no_upcoming() {
+  let base = "* changelog\n** v0.1.0\n*** Additions\n1. Initial\n";
+  let head = "* changelog\n** v0.2.0\n*** Additions\n1. Another\n** v0.1.0\n*** Additions\n1. Initial\n";
+  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+}
+
+#[test]
+fn diff_range_ignores_headings_when_comparing() {
+  // Adding a new sub-heading alone does not count as a content addition.
+  let base = "* changelog\n** Upcoming\n*** Additions\n";
+  let head = "* changelog\n** Upcoming\n*** Breaking\n*** Additions\n";
+  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+}
+
+#[test]
+fn diff_range_ignores_comment_lines() {
+  let base = "* changelog\n** Upcoming\n*** Additions\n";
+  let head = "* changelog\n** Upcoming\n*** Additions\n# This is a comment\n";
+  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+}
+
+#[test]
+fn diff_range_ignores_comment_heading_subtree() {
+  // A "COMMENT" heading makes the whole subtree invisible.
+  let base = "* changelog\n** Upcoming\n*** Additions\n";
+  let head = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** COMMENT Draft notes\n",
+    "1. This should not count\n",
+    "*** Additions\n",
+  );
+  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+}
+
+#[test]
+fn diff_range_only_skips_comment_subtree_not_siblings() {
+  // Content under a non-COMMENT sibling after a COMMENT subtree should count.
+  let base = "* changelog\n** Upcoming\n*** Additions\n";
+  let head = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** COMMENT Draft notes\n",
+    "1. This should not count\n",
+    "*** Additions\n",
+    "1. This should count\n",
+  );
+  assert!(has_upcoming_additions(base, head, "Upcoming"));
+}
+
+#[test]
+fn diff_range_ignores_noexport_subtree() {
+  let base = "* changelog\n** Upcoming\n*** Additions\n";
+  let head = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Internal notes   :noexport:\n",
+    "1. This should not count\n",
+    "*** Additions\n",
+  );
+  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+}
+
+#[test]
+fn diff_range_only_skips_noexport_subtree_not_siblings() {
+  let base = "* changelog\n** Upcoming\n*** Additions\n";
+  let head = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Internal notes   :noexport:\n",
+    "1. This should not count\n",
+    "*** Additions\n",
+    "1. This should count\n",
+  );
+  assert!(has_upcoming_additions(base, head, "Upcoming"));
+}
+
+#[test]
+fn diff_range_ignores_property_drawers() {
+  // Adding a property drawer to Upcoming should not count as a visible addition.
+  let base = "* changelog\n** Upcoming\n*** Additions\n";
+  let head = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    ":PROPERTIES:\n",
+    ":CUSTOM_ID: upcoming\n",
+    ":END:\n",
+    "*** Additions\n",
+  );
+  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+}
+
+#[test]
+fn diff_range_ignores_planning_lines() {
+  let base = "* changelog\n** Upcoming\n*** Additions\n";
+  let head =
+    "* changelog\n** Upcoming\nSCHEDULED: <2026-01-01>\n*** Additions\n";
+  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+}
+
+#[test]
+fn diff_range_respects_custom_upcoming_heading() {
+  let base = "* changelog\n** Next\n*** Additions\n";
+  let head = "* changelog\n** Next\n*** Additions\n1. New entry\n";
+  assert!(has_upcoming_additions(base, head, "Next"));
+  // "Upcoming" is absent in both — no additions under that name.
+  assert!(!has_upcoming_additions(base, head, "Upcoming"));
 }

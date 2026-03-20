@@ -1,7 +1,9 @@
 mod config;
 mod logging;
 
-use changelog_roller_lib::{is_ready_to_roll, roll, RollError};
+use changelog_roller_lib::{
+  has_upcoming_additions, is_ready_to_roll, roll, RollError,
+};
 use clap::Parser;
 use config::{CliRaw, Config, ConfigError};
 use logging::init_logging;
@@ -14,7 +16,7 @@ enum ApplicationError {
   #[error("Failed to load configuration during startup: {0}")]
   ConfigurationLoad(#[from] ConfigError),
 
-  #[error("--input-file is required when using --add-version")]
+  #[error("--input-file is required when using --add-version or --diff-range")]
   MissingInputFile,
 
   #[error("Failed to read changelog at {path:?}: {source}")]
@@ -31,6 +33,19 @@ enum ApplicationError {
 
   #[error("Failed to roll changelog: {0}")]
   RollFailed(#[from] RollError),
+
+  #[error("Failed to run git: {0}")]
+  GitRun(std::io::Error),
+
+  #[error("git show {git_ref}:{path} failed: {stderr}")]
+  GitShow {
+    git_ref: String,
+    path: String,
+    stderr: String,
+  },
+
+  #[error("git output is not valid UTF-8: {0}")]
+  GitOutputEncoding(#[from] std::string::FromUtf8Error),
 }
 
 fn main() -> Result<(), ApplicationError> {
@@ -49,6 +64,27 @@ fn main() -> Result<(), ApplicationError> {
 
   info!("Shutting down changelog-roller");
   Ok(())
+}
+
+fn git_show_file(
+  git_ref: &str,
+  path: &PathBuf,
+) -> Result<String, ApplicationError> {
+  let path_str = path.to_string_lossy().into_owned();
+  let output = std::process::Command::new("git")
+    .args(["show", &format!("{}:{}", git_ref, path_str)])
+    .output()
+    .map_err(ApplicationError::GitRun)?;
+
+  if !output.status.success() {
+    return Err(ApplicationError::GitShow {
+      git_ref: git_ref.to_string(),
+      path: path_str,
+      stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    });
+  }
+
+  Ok(String::from_utf8(output.stdout)?)
 }
 
 fn run(config: Config) -> Result<(), ApplicationError> {
@@ -82,6 +118,39 @@ fn run(config: Config) -> Result<(), ApplicationError> {
         std::process::exit(1);
       }
       Err(e) => return Err(ApplicationError::RollFailed(e)),
+    }
+
+    return Ok(());
+  }
+
+  if let Some(ref base_ref) = config.diff_range {
+    let input_path = config
+      .input_file
+      .as_ref()
+      .ok_or(ApplicationError::MissingInputFile)?;
+
+    let head_content =
+      std::fs::read_to_string(input_path).map_err(|source| {
+        ApplicationError::ChangelogRead {
+          path: input_path.clone(),
+          source,
+        }
+      })?;
+
+    let base_content = git_show_file(base_ref, input_path)?;
+
+    if has_upcoming_additions(
+      &base_content,
+      &head_content,
+      &config.upcoming_heading,
+    ) {
+      info!("Upcoming section has new entries relative to '{}'", base_ref);
+    } else {
+      eprintln!(
+        "No new entries added to '{}' relative to '{}'",
+        config.upcoming_heading, base_ref
+      );
+      std::process::exit(1);
     }
 
     return Ok(());

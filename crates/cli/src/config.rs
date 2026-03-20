@@ -60,6 +60,11 @@ pub struct CliRaw {
   /// Exit non-zero if the upcoming section has no changes; useful as a CI gate
   #[arg(long)]
   pub ready_to_roll: bool,
+
+  /// Git ref to diff against (e.g. origin/main); exit non-zero if no new
+  /// entries were added to the upcoming section relative to that ref
+  #[arg(long, env = "DIFF_RANGE")]
+  pub diff_range: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -95,6 +100,7 @@ pub struct Config {
   pub add_version: Option<String>,
   pub upcoming_heading: String,
   pub ready_to_roll: bool,
+  pub diff_range: Option<String>,
 }
 
 impl Config {
@@ -139,6 +145,7 @@ impl Config {
       add_version: cli.add_version,
       upcoming_heading,
       ready_to_roll: cli.ready_to_roll,
+      diff_range: cli.diff_range,
     })
   }
 }
