@@ -145,6 +145,26 @@ fn test_ready_to_roll_fails_when_upcoming_empty() {
 }
 
 #[test]
+fn test_check_additions_help_documents_under_flag() {
+  let output = Command::new(get_binary_path())
+    .args(["check-additions", "--help"])
+    .output()
+    .expect("Failed to execute binary");
+
+  assert!(
+    output.status.success(),
+    "Expected success exit code from check-additions --help, got: {:?}",
+    output.status.code()
+  );
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  assert!(
+    stdout.contains("--under"),
+    "Expected check-additions help to advertise --under, got: {}",
+    stdout
+  );
+}
+
+#[test]
 fn test_insert_item_writes_to_stdout() {
   let path = unique_temp_path("insert-stdout");
   let original = "* changelog\n** Upcoming\n*** Additions\n1. First thing\n";

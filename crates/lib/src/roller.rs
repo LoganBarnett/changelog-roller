@@ -10,7 +10,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum RollError {
   #[error("No '{heading}' heading found in changelog")]
-  UpcomingNotFound { heading: String },
+  HeadingNotFound { heading: String },
 }
 
 /// Returns one entry per piece of "visible content" found beneath `node`:
@@ -43,41 +43,46 @@ fn visible_content(node: &SyntaxNode) -> Vec<String> {
     .collect()
 }
 
-/// Returns the visible content entries under the upcoming section, or an
-/// empty `Vec` when the upcoming heading is absent — so callers can still
-/// diff even if one side has no upcoming section at all.
-fn upcoming_visible_content(
-  org_text: &str,
-  upcoming_heading: &str,
-) -> Vec<String> {
+/// Returns the visible content entries under the section reached by
+/// walking `path`, or an empty `Vec` when any segment of that path is
+/// absent — so callers can still diff even if one side has no such
+/// section at all.
+fn section_visible_content(org_text: &str, path: &[String]) -> Vec<String> {
   let org = Org::parse(org_text);
-  find_upcoming(&org, upcoming_heading)
-    .map(|u| visible_content(u.syntax()))
+  find_section_at_path(&org, path)
+    .map(|h| visible_content(h.syntax()))
     .unwrap_or_default()
 }
 
-/// Returns `true` if `head_text` contains visible-content entries under the
-/// upcoming section that are not present in `base_text`.
-pub fn has_upcoming_additions(
+/// Returns `true` if `head_text` contains visible-content entries under
+/// the section at `path` that are not present in `base_text`.  `path`'s
+/// first segment is searched anywhere in the document; subsequent
+/// segments drill into child headings by exact title match.  By
+/// convention the first segment is the configured "upcoming" heading,
+/// but nothing in this function depends on that — any starting heading
+/// works.
+pub fn has_section_additions(
   base_text: &str,
   head_text: &str,
-  upcoming_heading: &str,
+  path: &[String],
 ) -> bool {
-  let base: HashSet<String> =
-    upcoming_visible_content(base_text, upcoming_heading)
-      .into_iter()
-      .collect();
-  upcoming_visible_content(head_text, upcoming_heading)
+  let base: HashSet<String> = section_visible_content(base_text, path)
+    .into_iter()
+    .collect();
+  section_visible_content(head_text, path)
     .iter()
     .any(|l| !base.contains(l))
 }
 
-/// Locates the upcoming headline anywhere in the tree by exact-match of its
-/// raw title.  Returns `UpcomingNotFound` if no headline in the document
-/// has that title.
-fn find_upcoming(
+/// Locates the section identified by `path`.  The first segment is
+/// searched anywhere in the document by exact title match; subsequent
+/// segments drill into direct child headings by exact title match.
+/// Returns `HeadingNotFound` carrying the segment that failed to
+/// resolve.  An empty path is itself a programmer-side `HeadingNotFound`
+/// — callers always pass at least the root segment.
+fn find_section_at_path(
   org: &Org,
-  upcoming_heading: &str,
+  path: &[String],
 ) -> Result<Headline, RollError> {
   fn search(headline: &Headline, target: &str) -> Option<Headline> {
     if headline.title_raw().trim() == target {
@@ -88,52 +93,71 @@ fn find_upcoming(
       .find_map(|child| search(&child, target))
   }
 
-  org
+  let (root, rest) =
+    path
+      .split_first()
+      .ok_or_else(|| RollError::HeadingNotFound {
+        heading: String::new(),
+      })?;
+
+  let root_headline = org
     .document()
     .headlines()
-    .find_map(|top| search(&top, upcoming_heading))
-    .ok_or_else(|| RollError::UpcomingNotFound {
-      heading: upcoming_heading.to_string(),
-    })
+    .find_map(|top| search(&top, root))
+    .ok_or_else(|| RollError::HeadingNotFound {
+      heading: root.clone(),
+    })?;
+
+  rest.iter().try_fold(root_headline, |current, segment| {
+    current
+      .headlines()
+      .find(|child| child.title_raw().trim() == segment.as_str())
+      .ok_or_else(|| RollError::HeadingNotFound {
+        heading: segment.clone(),
+      })
+  })
 }
 
-/// Returns `true` if the upcoming section has at least one subsection with
-/// content, indicating the changelog is ready to be stamped with a version.
-/// Returns `false` if every subsection is empty.
+/// Returns `true` if the section at `path` has at least one direct child
+/// heading with content, indicating the changelog is ready to be stamped
+/// with a version.  Returns `false` if every child heading is empty.
 ///
 /// Intended for use as a CI gate: a non-ready result should produce a
 /// non-zero exit code so pull requests without documented changes are
-/// blocked from releasing.
+/// blocked from releasing.  The conventional `path` is `["Upcoming"]`,
+/// but anything that resolves to a section works.
 pub fn is_ready_to_roll(
   org_text: &str,
-  upcoming_heading: &str,
+  path: &[String],
 ) -> Result<bool, RollError> {
   let org = Org::parse(org_text);
-  let upcoming = find_upcoming(&org, upcoming_heading)?;
-  Ok(upcoming.headlines().any(|h| h.section().is_some()))
+  let section = find_section_at_path(&org, path)?;
+  Ok(section.headlines().any(|h| h.section().is_some()))
 }
 
-/// Rolls a changelog forward by stamping the upcoming section as a new
-/// version and inserting a fresh empty upcoming section above it.
+/// Rolls a changelog forward by stamping the section at `path` as a new
+/// version and inserting a fresh empty replica above it.
 ///
 /// Empty subsections (those with no content) are pruned from the versioned
 /// entry so that only changes that actually happened appear under the new
-/// version.  The fresh upcoming section always carries the full set of
-/// subsection headings, ready to be populated.
+/// version.  The fresh replica always carries the full set of subsection
+/// headings, ready to be populated.  The conventional `path` is
+/// `["Upcoming"]`; the lib itself has no opinion.
 pub fn roll(
   org_text: String,
   new_version: &str,
-  upcoming_heading: &str,
+  path: &[String],
 ) -> Result<String, RollError> {
   let mut org = Org::parse(&org_text);
-  let upcoming = find_upcoming(&org, upcoming_heading)?;
+  let upcoming = find_section_at_path(&org, path)?;
+  let upcoming_title = upcoming.title_raw().trim_end().to_string();
 
   let stars = "*".repeat(upcoming.level());
   let substars = "*".repeat(upcoming.level() + 1);
 
   let subheadings: Vec<Headline> = upcoming.headlines().collect();
 
-  let mut fresh = format!("{} {}\n", stars, upcoming_heading);
+  let mut fresh = format!("{} {}\n", stars, upcoming_title);
   for sub in &subheadings {
     fresh.push_str(&format!("{} {}\n", substars, sub.title_raw().trim_end()));
   }
@@ -179,26 +203,26 @@ fn bullet_number(bullet: &str) -> Option<u32> {
   digits.parse::<u32>().ok()
 }
 
-/// Inserts a new ordered-list item under a subheading of the upcoming
-/// section.  The item is appended after the last existing numbered entry,
-/// numbered as `<max + 1>`; if no numbered entries exist yet the new item
-/// is numbered `1`.  If the subheading does not exist under upcoming, it is
-/// created at the end of the upcoming span with the new item as its only
-/// content.
+/// Inserts a new ordered-list item under a subheading of the section
+/// identified by `parent_path`.  The item is appended after the last
+/// existing numbered entry, numbered as `<max + 1>`; if no numbered
+/// entries exist yet the new item is numbered `1`.  If `item_heading`
+/// does not exist as a direct child of the parent, it is created at the
+/// end of the parent's span with the new item as its only content.
 ///
 /// Heading matching is exact: `item_heading` must equal the subheading's
 /// raw title byte-for-byte (after trimming the trailing whitespace orgize
-/// includes on titles).  Only subheadings directly under `Upcoming` are
-/// considered; identically-named subheadings under versioned entries are
-/// left alone.
+/// includes on titles).  Only subheadings directly under the parent are
+/// considered; identically-named subheadings under sibling sections are
+/// left alone.  The conventional `parent_path` is `["Upcoming"]`.
 pub fn insert_item(
   org_text: String,
-  upcoming_heading: &str,
+  parent_path: &[String],
   item_heading: &str,
   body: &str,
 ) -> Result<String, RollError> {
   let mut org = Org::parse(&org_text);
-  let upcoming = find_upcoming(&org, upcoming_heading)?;
+  let upcoming = find_section_at_path(&org, parent_path)?;
 
   let existing = upcoming
     .headlines()

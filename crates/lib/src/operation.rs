@@ -14,9 +14,7 @@ use std::{
 
 use thiserror::Error;
 
-use crate::roller::{
-  self, has_upcoming_additions, is_ready_to_roll, RollError,
-};
+use crate::roller::{self, has_section_additions, is_ready_to_roll, RollError};
 
 /// Errors surfaced by the operations in this module.  Anything an
 /// operation can recover from (such as a missing upcoming heading) is
@@ -55,12 +53,12 @@ pub enum OperationError {
 /// Result of a `ready-to-roll` CI gate check.
 #[derive(Debug)]
 pub enum ReadyToRollOutcome {
-  /// The upcoming section has at least one populated subsection.
+  /// The target section has at least one populated subsection.
   Ready,
-  /// The upcoming section exists but all its subsections are empty.
+  /// The target section exists but all its subsections are empty.
   NoChanges,
-  /// No heading with the configured upcoming name was found.
-  UpcomingNotFound { heading: String },
+  /// No heading matching a segment of the requested path was found.
+  HeadingNotFound { heading: String },
 }
 
 /// Result of a `check-additions` diff against a git ref.
@@ -78,8 +76,8 @@ pub enum MutationOutcome {
   /// Caller did not ask for an in-place write; here is the updated
   /// changelog text for the caller to do whatever it likes with.
   Content(String),
-  /// The configured upcoming heading was not present in the input file.
-  UpcomingNotFound { heading: String },
+  /// A heading along the requested path was not found in the input file.
+  HeadingNotFound { heading: String },
 }
 
 fn read_changelog(path: &Path) -> Result<String, OperationError> {
@@ -129,74 +127,76 @@ fn deliver(
   }
 }
 
-/// Reads `input` and reports whether the upcoming section is ready to be
-/// stamped with a version.  A missing upcoming heading is an outcome, not
-/// an error — CI front-ends typically want a clean exit-with-message for
+/// Reads `input` and reports whether the section at `path` is ready to
+/// be stamped with a version.  A missing heading is an outcome, not an
+/// error — CI front-ends typically want a clean exit-with-message for
 /// either "no changes" or "no heading", not a stack trace.
 pub fn ready_to_roll(
   input: &Path,
-  upcoming_heading: &str,
+  path: &[String],
 ) -> Result<ReadyToRollOutcome, OperationError> {
   let content = read_changelog(input)?;
-  match is_ready_to_roll(&content, upcoming_heading) {
+  match is_ready_to_roll(&content, path) {
     Ok(true) => Ok(ReadyToRollOutcome::Ready),
     Ok(false) => Ok(ReadyToRollOutcome::NoChanges),
-    Err(RollError::UpcomingNotFound { heading }) => {
-      Ok(ReadyToRollOutcome::UpcomingNotFound { heading })
+    Err(RollError::HeadingNotFound { heading }) => {
+      Ok(ReadyToRollOutcome::HeadingNotFound { heading })
     }
   }
 }
 
 /// Reads `input` at HEAD and at the given git ref, and reports whether
-/// HEAD added any visible-content entries to the upcoming section
-/// relative to the ref.
+/// HEAD added any visible-content entries relative to the ref under the
+/// section at `path`.  Callers choose the path; the conventional value
+/// is `[upcoming_heading]` (optionally followed by drill-down segments),
+/// but nothing here enforces that.
 pub fn check_additions(
   input: &Path,
   base_ref: &str,
-  upcoming_heading: &str,
+  path: &[String],
 ) -> Result<CheckAdditionsOutcome, OperationError> {
   let head_content = read_changelog(input)?;
   let base_content = git_show_file(base_ref, input)?;
-  if has_upcoming_additions(&base_content, &head_content, upcoming_heading) {
+  if has_section_additions(&base_content, &head_content, path) {
     Ok(CheckAdditionsOutcome::HasAdditions)
   } else {
     Ok(CheckAdditionsOutcome::NoAdditions)
   }
 }
 
-/// Rolls the changelog at `input` forward by stamping the upcoming
-/// section as `version`.  When `in_place` is true, writes the result back
-/// to `input`; otherwise returns the text via [`MutationOutcome::Output`].
+/// Rolls the changelog at `input` forward by stamping the section at
+/// `path` as `version`.  When `in_place` is true, writes the result back
+/// to `input`; otherwise returns the text via [`MutationOutcome::Content`].
 pub fn roll(
   input: &Path,
   version: &str,
-  upcoming_heading: &str,
+  path: &[String],
   in_place: bool,
 ) -> Result<MutationOutcome, OperationError> {
   let content = read_changelog(input)?;
-  match roller::roll(content, version, upcoming_heading) {
+  match roller::roll(content, version, path) {
     Ok(rolled) => deliver(input, rolled, in_place),
-    Err(RollError::UpcomingNotFound { heading }) => {
-      Ok(MutationOutcome::UpcomingNotFound { heading })
+    Err(RollError::HeadingNotFound { heading }) => {
+      Ok(MutationOutcome::HeadingNotFound { heading })
     }
   }
 }
 
-/// Inserts an ordered-list item under a subheading of the upcoming
-/// section in the changelog at `input`.  Output handling mirrors
-/// [`roll`].
+/// Inserts an ordered-list item under `item_heading` (find-or-created)
+/// inside the section identified by `parent_path` in the changelog at
+/// `input`.  Output handling mirrors [`roll`].
 pub fn insert_item(
   input: &Path,
-  upcoming_heading: &str,
+  parent_path: &[String],
   item_heading: &str,
   body: &str,
   in_place: bool,
 ) -> Result<MutationOutcome, OperationError> {
   let content = read_changelog(input)?;
-  match roller::insert_item(content, upcoming_heading, item_heading, body) {
+  match roller::insert_item(content, parent_path, item_heading, body) {
     Ok(updated) => deliver(input, updated, in_place),
-    Err(RollError::UpcomingNotFound { heading }) => {
-      Ok(MutationOutcome::UpcomingNotFound { heading })
+    Err(RollError::HeadingNotFound { heading }) => {
+      Ok(MutationOutcome::HeadingNotFound { heading })
     }
   }
 }

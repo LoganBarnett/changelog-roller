@@ -47,7 +47,7 @@ fn present_mutation(outcome: MutationOutcome) -> Result<(), ApplicationError> {
       print!("{}", content);
       Ok(())
     }
-    MutationOutcome::UpcomingNotFound { heading } => {
+    MutationOutcome::HeadingNotFound { heading } => {
       eprintln!("No '{}' heading found", heading);
       std::process::exit(1);
     }
@@ -55,12 +55,10 @@ fn present_mutation(outcome: MutationOutcome) -> Result<(), ApplicationError> {
 }
 
 fn run(config: Config) -> Result<(), ApplicationError> {
+  let upcoming_path = vec![config.upcoming_heading.clone()];
   match config.command {
     CliCommand::ReadyToRoll => {
-      match operation::ready_to_roll(
-        &config.input_file,
-        &config.upcoming_heading,
-      )? {
+      match operation::ready_to_roll(&config.input_file, &upcoming_path)? {
         ReadyToRollOutcome::Ready => {
           info!(
             "Upcoming heading '{}' has changes — ready to roll",
@@ -75,27 +73,26 @@ fn run(config: Config) -> Result<(), ApplicationError> {
           );
           std::process::exit(1);
         }
-        ReadyToRollOutcome::UpcomingNotFound { heading } => {
+        ReadyToRollOutcome::HeadingNotFound { heading } => {
           eprintln!("Not ready to roll: no '{}' heading found", heading);
           std::process::exit(1);
         }
       }
     }
 
-    CliCommand::CheckAdditions { base } => {
-      match operation::check_additions(
-        &config.input_file,
-        &base,
-        &config.upcoming_heading,
-      )? {
+    CliCommand::CheckAdditions { base, under } => {
+      let mut path = upcoming_path;
+      path.extend(under);
+      let target_label = path.join(" → ");
+      match operation::check_additions(&config.input_file, &base, &path)? {
         CheckAdditionsOutcome::HasAdditions => {
-          info!("Upcoming section has new entries relative to '{}'", base);
+          info!("'{}' has new entries relative to '{}'", target_label, base);
           Ok(())
         }
         CheckAdditionsOutcome::NoAdditions => {
           eprintln!(
             "No new entries added to '{}' relative to '{}'",
-            config.upcoming_heading, base
+            target_label, base
           );
           std::process::exit(1);
         }
@@ -105,14 +102,14 @@ fn run(config: Config) -> Result<(), ApplicationError> {
     CliCommand::Roll { version } => present_mutation(operation::roll(
       &config.input_file,
       &version,
-      &config.upcoming_heading,
+      &upcoming_path,
       config.in_place,
     )?),
 
     CliCommand::InsertItem { heading, body } => {
       present_mutation(operation::insert_item(
         &config.input_file,
-        &config.upcoming_heading,
+        &upcoming_path,
         &heading,
         &body,
         config.in_place,

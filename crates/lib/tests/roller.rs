@@ -1,7 +1,16 @@
 use changelog_roller_lib::{
-  has_upcoming_additions, insert_item, is_ready_to_roll, roll, RollError,
+  has_section_additions, insert_item, is_ready_to_roll, roll, RollError,
 };
 use orgize::{ast::Headline, Org};
+
+/// Builds a `Vec<String>` path from string-literal segments — keeps test
+/// callsites tight (`path!["Upcoming"]` instead of
+/// `&vec!["Upcoming".to_string()]`).
+macro_rules! path {
+  ($($segment:expr),* $(,)?) => {
+    vec![$($segment.to_string()),*]
+  };
+}
 
 // Recursively searches the document for the first headline whose raw title
 // matches `target`, returning its immediate child headlines' titles.
@@ -32,7 +41,7 @@ fn child_titles(org: &Org, parent_title: &str) -> Vec<String> {
 #[test]
 fn new_upcoming_precedes_new_version() {
   let input = "* changelog\n** Upcoming\n*** Breaking\n*** Additions\n*** Fixes\n** v0.1.0\n*** Additions\n1. Initial release\n";
-  let result = roll(input.to_string(), "v0.2.0", "Upcoming").unwrap();
+  let result = roll(input.to_string(), "v0.2.0", &path!["Upcoming"]).unwrap();
   let org = Org::parse(&result);
 
   let changelog_children = child_titles(&org, "changelog");
@@ -47,7 +56,7 @@ fn new_upcoming_precedes_new_version() {
 fn new_upcoming_carries_all_subsections() {
   let input =
     "* changelog\n** Upcoming\n*** Breaking\n*** Additions\n*** Fixes\n";
-  let result = roll(input.to_string(), "v0.1.0", "Upcoming").unwrap();
+  let result = roll(input.to_string(), "v0.1.0", &path!["Upcoming"]).unwrap();
   let org = Org::parse(&result);
 
   assert_eq!(
@@ -60,7 +69,7 @@ fn new_upcoming_carries_all_subsections() {
 #[test]
 fn new_upcoming_subsections_are_empty() {
   let input = "* changelog\n** Upcoming\n*** Breaking\n*** Additions\n1. Something added\n*** Fixes\n";
-  let result = roll(input.to_string(), "v0.1.0", "Upcoming").unwrap();
+  let result = roll(input.to_string(), "v0.1.0", &path!["Upcoming"]).unwrap();
   let org = Org::parse(&result);
 
   for title in &["Breaking", "Additions", "Fixes"] {
@@ -107,7 +116,7 @@ fn empty_sections_pruned_from_versioned_entry() {
     "*** Fixes\n",
     "** v0.1.0\n",
   );
-  let result = roll(input.to_string(), "v0.2.0", "Upcoming").unwrap();
+  let result = roll(input.to_string(), "v0.2.0", &path!["Upcoming"]).unwrap();
   let org = Org::parse(&result);
 
   let version_children = child_titles(&org, "v0.2.0");
@@ -122,7 +131,7 @@ fn empty_sections_pruned_from_versioned_entry() {
 fn all_empty_sections_yields_empty_versioned_entry() {
   let input =
     "* changelog\n** Upcoming\n*** Breaking\n*** Additions\n*** Fixes\n";
-  let result = roll(input.to_string(), "v0.1.0", "Upcoming").unwrap();
+  let result = roll(input.to_string(), "v0.1.0", &path!["Upcoming"]).unwrap();
   let org = Org::parse(&result);
 
   let version_children = child_titles(&org, "v0.1.0");
@@ -144,7 +153,7 @@ fn all_populated_sections_all_appear_in_versioned_entry() {
     "*** Fixes\n",
     "1. Fixed thing\n",
   );
-  let result = roll(input.to_string(), "v0.1.0", "Upcoming").unwrap();
+  let result = roll(input.to_string(), "v0.1.0", &path!["Upcoming"]).unwrap();
   let org = Org::parse(&result);
 
   assert_eq!(
@@ -165,7 +174,7 @@ fn versioned_entry_content_is_preserved() {
     "*** Additions\n",
     "1. Important change\n",
   );
-  let result = roll(input.to_string(), "v0.1.0", "Upcoming").unwrap();
+  let result = roll(input.to_string(), "v0.1.0", &path!["Upcoming"]).unwrap();
 
   // The content must appear verbatim somewhere in the output.
   assert!(
@@ -188,7 +197,7 @@ fn pre_existing_versions_are_untouched() {
     "*** Additions\n",
     "1. Initial release\n",
   );
-  let result = roll(input.to_string(), "v0.3.0", "Upcoming").unwrap();
+  let result = roll(input.to_string(), "v0.3.0", &path!["Upcoming"]).unwrap();
   let org = Org::parse(&result);
 
   assert_eq!(
@@ -208,7 +217,7 @@ fn pre_existing_versions_are_untouched() {
 #[test]
 fn custom_upcoming_heading_is_respected() {
   let input = "* changelog\n** Next\n*** Breaking\n*** Additions\n*** Fixes\n";
-  let result = roll(input.to_string(), "v1.0.0", "Next").unwrap();
+  let result = roll(input.to_string(), "v1.0.0", &path!["Next"]).unwrap();
   let org = Org::parse(&result);
 
   assert_eq!(child_titles(&org, "changelog"), vec!["Next", "v1.0.0"]);
@@ -221,10 +230,10 @@ fn custom_upcoming_heading_is_respected() {
 #[test]
 fn missing_upcoming_heading_returns_error() {
   let input = "* changelog\n** v0.1.0\n*** Additions\n1. Initial\n";
-  let err = roll(input.to_string(), "v0.2.0", "Upcoming").unwrap_err();
+  let err = roll(input.to_string(), "v0.2.0", &path!["Upcoming"]).unwrap_err();
   assert!(
-    matches!(err, RollError::UpcomingNotFound { .. }),
-    "expected UpcomingNotFound, got: {:?}",
+    matches!(err, RollError::HeadingNotFound { .. }),
+    "expected HeadingNotFound, got: {:?}",
     err
   );
 }
@@ -243,35 +252,35 @@ fn ready_to_roll_true_when_any_section_has_content() {
     "1. Something new\n",
     "*** Fixes\n",
   );
-  assert!(is_ready_to_roll(input, "Upcoming").unwrap());
+  assert!(is_ready_to_roll(input, &path!["Upcoming"]).unwrap());
 }
 
 #[test]
 fn ready_to_roll_false_when_all_sections_empty() {
   let input =
     "* changelog\n** Upcoming\n*** Breaking\n*** Additions\n*** Fixes\n";
-  assert!(!is_ready_to_roll(input, "Upcoming").unwrap());
+  assert!(!is_ready_to_roll(input, &path!["Upcoming"]).unwrap());
 }
 
 #[test]
 fn ready_to_roll_false_for_empty_upcoming_with_no_subsections() {
   let input = "* changelog\n** Upcoming\n";
-  assert!(!is_ready_to_roll(input, "Upcoming").unwrap());
+  assert!(!is_ready_to_roll(input, &path!["Upcoming"]).unwrap());
 }
 
 #[test]
 fn ready_to_roll_error_when_upcoming_heading_missing() {
   let input = "* changelog\n** v0.1.0\n*** Additions\n1. Initial\n";
-  let err = is_ready_to_roll(input, "Upcoming").unwrap_err();
-  assert!(matches!(err, RollError::UpcomingNotFound { .. }));
+  let err = is_ready_to_roll(input, &path!["Upcoming"]).unwrap_err();
+  assert!(matches!(err, RollError::HeadingNotFound { .. }));
 }
 
 #[test]
 fn ready_to_roll_respects_custom_upcoming_heading() {
   let input = "* changelog\n** Next\n*** Additions\n1. Something\n";
-  assert!(is_ready_to_roll(input, "Next").unwrap());
+  assert!(is_ready_to_roll(input, &path!["Next"]).unwrap());
   // The default "Upcoming" name is absent — should return an error, not false.
-  assert!(is_ready_to_roll(input, "Upcoming").is_err());
+  assert!(is_ready_to_roll(input, &path!["Upcoming"]).is_err());
 }
 
 // ============================================================================
@@ -282,13 +291,13 @@ fn ready_to_roll_respects_custom_upcoming_heading() {
 fn diff_range_detects_new_entry() {
   let base = "* changelog\n** Upcoming\n*** Additions\n";
   let head = "* changelog\n** Upcoming\n*** Additions\n1. Brand new thing\n";
-  assert!(has_upcoming_additions(base, head, "Upcoming"));
+  assert!(has_section_additions(base, head, &path!["Upcoming"]));
 }
 
 #[test]
 fn diff_range_no_addition_when_head_same_as_base() {
   let input = "* changelog\n** Upcoming\n*** Additions\n1. Already there\n";
-  assert!(!has_upcoming_additions(input, input, "Upcoming"));
+  assert!(!has_section_additions(input, input, &path!["Upcoming"]));
 }
 
 #[test]
@@ -296,21 +305,21 @@ fn diff_range_no_addition_when_head_is_subset_of_base() {
   let base =
     "* changelog\n** Upcoming\n*** Additions\n1. Already there\n1. Another\n";
   let head = "* changelog\n** Upcoming\n*** Additions\n1. Already there\n";
-  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+  assert!(!has_section_additions(base, head, &path!["Upcoming"]));
 }
 
 #[test]
 fn diff_range_true_when_base_has_no_upcoming() {
   let base = "* changelog\n** v0.1.0\n*** Additions\n1. Initial\n";
   let head = "* changelog\n** Upcoming\n*** Additions\n1. New thing\n** v0.1.0\n*** Additions\n1. Initial\n";
-  assert!(has_upcoming_additions(base, head, "Upcoming"));
+  assert!(has_section_additions(base, head, &path!["Upcoming"]));
 }
 
 #[test]
 fn diff_range_false_when_both_have_no_upcoming() {
   let base = "* changelog\n** v0.1.0\n*** Additions\n1. Initial\n";
   let head = "* changelog\n** v0.2.0\n*** Additions\n1. Another\n** v0.1.0\n*** Additions\n1. Initial\n";
-  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+  assert!(!has_section_additions(base, head, &path!["Upcoming"]));
 }
 
 #[test]
@@ -318,14 +327,14 @@ fn diff_range_ignores_headings_when_comparing() {
   // Adding a new sub-heading alone does not count as a content addition.
   let base = "* changelog\n** Upcoming\n*** Additions\n";
   let head = "* changelog\n** Upcoming\n*** Breaking\n*** Additions\n";
-  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+  assert!(!has_section_additions(base, head, &path!["Upcoming"]));
 }
 
 #[test]
 fn diff_range_ignores_comment_lines() {
   let base = "* changelog\n** Upcoming\n*** Additions\n";
   let head = "* changelog\n** Upcoming\n*** Additions\n# This is a comment\n";
-  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+  assert!(!has_section_additions(base, head, &path!["Upcoming"]));
 }
 
 #[test]
@@ -339,7 +348,7 @@ fn diff_range_ignores_comment_heading_subtree() {
     "1. This should not count\n",
     "*** Additions\n",
   );
-  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+  assert!(!has_section_additions(base, head, &path!["Upcoming"]));
 }
 
 #[test]
@@ -354,7 +363,7 @@ fn diff_range_only_skips_comment_subtree_not_siblings() {
     "*** Additions\n",
     "1. This should count\n",
   );
-  assert!(has_upcoming_additions(base, head, "Upcoming"));
+  assert!(has_section_additions(base, head, &path!["Upcoming"]));
 }
 
 #[test]
@@ -367,7 +376,7 @@ fn diff_range_ignores_noexport_subtree() {
     "1. This should not count\n",
     "*** Additions\n",
   );
-  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+  assert!(!has_section_additions(base, head, &path!["Upcoming"]));
 }
 
 #[test]
@@ -381,7 +390,7 @@ fn diff_range_only_skips_noexport_subtree_not_siblings() {
     "*** Additions\n",
     "1. This should count\n",
   );
-  assert!(has_upcoming_additions(base, head, "Upcoming"));
+  assert!(has_section_additions(base, head, &path!["Upcoming"]));
 }
 
 #[test]
@@ -396,7 +405,7 @@ fn diff_range_ignores_property_drawers() {
     ":END:\n",
     "*** Additions\n",
   );
-  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+  assert!(!has_section_additions(base, head, &path!["Upcoming"]));
 }
 
 #[test]
@@ -404,16 +413,103 @@ fn diff_range_ignores_planning_lines() {
   let base = "* changelog\n** Upcoming\n*** Additions\n";
   let head =
     "* changelog\n** Upcoming\nSCHEDULED: <2026-01-01>\n*** Additions\n";
-  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+  assert!(!has_section_additions(base, head, &path!["Upcoming"]));
 }
 
 #[test]
 fn diff_range_respects_custom_upcoming_heading() {
   let base = "* changelog\n** Next\n*** Additions\n";
   let head = "* changelog\n** Next\n*** Additions\n1. New entry\n";
-  assert!(has_upcoming_additions(base, head, "Next"));
+  assert!(has_section_additions(base, head, &path!["Next"]));
   // "Upcoming" is absent in both — no additions under that name.
-  assert!(!has_upcoming_additions(base, head, "Upcoming"));
+  assert!(!has_section_additions(base, head, &path!["Upcoming"]));
+}
+
+// ============================================================================
+// has_section_additions drilling through nested paths
+// ============================================================================
+
+#[test]
+fn diff_path_detects_addition_only_in_targeted_subsection() {
+  // A new entry under Additions but not under Breaking — drilling to
+  // Breaking must report no additions, while the root-only path still does.
+  let base = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Breaking\n",
+    "*** Additions\n",
+  );
+  let head = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Breaking\n",
+    "*** Additions\n",
+    "1. New thing\n",
+  );
+  assert!(has_section_additions(base, head, &path!["Upcoming"]));
+  assert!(!has_section_additions(base, head, &path!["Upcoming", "Breaking"]));
+}
+
+#[test]
+fn diff_path_detects_addition_in_drilled_subsection() {
+  let base = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Breaking\n",
+    "*** Additions\n",
+  );
+  let head = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Breaking\n",
+    "1. Dropped foo()\n",
+    "*** Additions\n",
+  );
+  assert!(has_section_additions(base, head, &path!["Upcoming", "Breaking"]));
+}
+
+#[test]
+fn diff_path_no_additions_when_drilled_subsection_missing_in_head() {
+  // If the drilled subsection does not exist in head, there is nothing
+  // there to have been added — even if siblings have new content.
+  let base = "* changelog\n** Upcoming\n*** Additions\n";
+  let head = "* changelog\n** Upcoming\n*** Additions\n1. New thing\n";
+  assert!(!has_section_additions(base, head, &path!["Upcoming", "Breaking"]));
+}
+
+#[test]
+fn diff_path_walks_multiple_segments() {
+  let base =
+    concat!("* changelog\n", "** Upcoming\n", "*** Breaking\n", "**** Abi\n",);
+  let head = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Breaking\n",
+    "**** Abi\n",
+    "1. Signature change\n",
+  );
+  assert!(has_section_additions(
+    base,
+    head,
+    &path!["Upcoming", "Breaking", "Abi"]
+  ));
+  // The signature change also surfaces under the intermediate Breaking
+  // section, since visible_content recurses through sub-headlines.
+  assert!(has_section_additions(base, head, &path!["Upcoming", "Breaking"]));
+}
+
+#[test]
+fn diff_path_does_not_require_upcoming_as_root() {
+  // The lib has no notion of "upcoming" — any heading can be the root.
+  let base = "* changelog\n** v0.1.0\n*** Additions\n1. Initial\n";
+  let head = concat!(
+    "* changelog\n",
+    "** v0.1.0\n",
+    "*** Additions\n",
+    "1. Initial\n",
+    "1. Retroactive note\n",
+  );
+  assert!(has_section_additions(base, head, &path!["v0.1.0"]));
 }
 
 // ============================================================================
@@ -429,9 +525,13 @@ fn insert_item_appends_next_number_to_existing_list() {
     "1. First thing\n",
     "*** Fixes\n",
   );
-  let result =
-    insert_item(input.to_string(), "Upcoming", "Additions", "Second thing")
-      .unwrap();
+  let result = insert_item(
+    input.to_string(),
+    &path!["Upcoming"],
+    "Additions",
+    "Second thing",
+  )
+  .unwrap();
   assert_eq!(
     result,
     concat!(
@@ -453,9 +553,13 @@ fn insert_item_starts_at_one_when_section_empty() {
     "*** Additions\n",
     "*** Fixes\n",
   );
-  let result =
-    insert_item(input.to_string(), "Upcoming", "Additions", "New thing")
-      .unwrap();
+  let result = insert_item(
+    input.to_string(),
+    &path!["Upcoming"],
+    "Additions",
+    "New thing",
+  )
+  .unwrap();
   assert_eq!(
     result,
     concat!(
@@ -476,9 +580,13 @@ fn insert_item_creates_missing_subheading() {
     "*** Additions\n",
     "** v0.1.0\n",
   );
-  let result =
-    insert_item(input.to_string(), "Upcoming", "Breaking", "Removed shiny")
-      .unwrap();
+  let result = insert_item(
+    input.to_string(),
+    &path!["Upcoming"],
+    "Breaking",
+    "Removed shiny",
+  )
+  .unwrap();
   assert_eq!(
     result,
     concat!(
@@ -496,7 +604,8 @@ fn insert_item_creates_missing_subheading() {
 fn insert_item_creates_subheading_at_eof_when_upcoming_is_last_section() {
   let input = "* changelog\n** Upcoming\n*** Additions\n";
   let result =
-    insert_item(input.to_string(), "Upcoming", "Fixes", "Fixed thing").unwrap();
+    insert_item(input.to_string(), &path!["Upcoming"], "Fixes", "Fixed thing")
+      .unwrap();
   assert_eq!(
     result,
     concat!(
@@ -520,7 +629,8 @@ fn insert_item_preserves_blank_line_separator_when_creating_subheading() {
     "** v0.1.0\n",
   );
   let result =
-    insert_item(input.to_string(), "Upcoming", "Fixes", "Fixed thing").unwrap();
+    insert_item(input.to_string(), &path!["Upcoming"], "Fixes", "Fixed thing")
+      .unwrap();
   assert_eq!(
     result,
     concat!(
@@ -539,11 +649,12 @@ fn insert_item_preserves_blank_line_separator_when_creating_subheading() {
 #[test]
 fn insert_item_returns_error_when_upcoming_missing() {
   let input = "* changelog\n** v0.1.0\n*** Additions\n1. Initial\n";
-  let err = insert_item(input.to_string(), "Upcoming", "Additions", "Body")
-    .unwrap_err();
+  let err =
+    insert_item(input.to_string(), &path!["Upcoming"], "Additions", "Body")
+      .unwrap_err();
   assert!(
-    matches!(err, RollError::UpcomingNotFound { .. }),
-    "expected UpcomingNotFound, got: {:?}",
+    matches!(err, RollError::HeadingNotFound { .. }),
+    "expected HeadingNotFound, got: {:?}",
     err
   );
 }
@@ -560,9 +671,13 @@ fn insert_item_does_not_touch_versioned_section_with_same_name() {
     "*** Additions\n",
     "1. Initial release\n",
   );
-  let result =
-    insert_item(input.to_string(), "Upcoming", "Additions", "New thing")
-      .unwrap();
+  let result = insert_item(
+    input.to_string(),
+    &path!["Upcoming"],
+    "Additions",
+    "New thing",
+  )
+  .unwrap();
   assert_eq!(
     result,
     concat!(
@@ -587,9 +702,13 @@ fn insert_item_heading_match_is_exact() {
     "*** Fixes\n",
     "1. Fixed something\n",
   );
-  let result =
-    insert_item(input.to_string(), "Upcoming", "Fix", "Different category")
-      .unwrap();
+  let result = insert_item(
+    input.to_string(),
+    &path!["Upcoming"],
+    "Fix",
+    "Different category",
+  )
+  .unwrap();
   assert_eq!(
     result,
     concat!(
@@ -615,7 +734,8 @@ fn insert_item_does_not_renumber_existing_items() {
     "1. Third (typo)\n",
   );
   let result =
-    insert_item(input.to_string(), "Upcoming", "Additions", "Fourth").unwrap();
+    insert_item(input.to_string(), &path!["Upcoming"], "Additions", "Fourth")
+      .unwrap();
   // max numbered value is 1, so new item is 2 — and the typos are left as-is.
   assert_eq!(
     result,
@@ -636,7 +756,8 @@ fn insert_item_respects_custom_upcoming_heading() {
   let input =
     concat!("* changelog\n", "** Next\n", "*** Additions\n", "** v0.1.0\n",);
   let result =
-    insert_item(input.to_string(), "Next", "Additions", "New thing").unwrap();
+    insert_item(input.to_string(), &path!["Next"], "Additions", "New thing")
+      .unwrap();
   assert_eq!(
     result,
     concat!(

@@ -72,6 +72,10 @@ pub enum CliCommand {
     /// Git ref to diff against (e.g. origin/main)
     #[arg(long)]
     base: String,
+    /// Drill into a subheading under upcoming.  Repeat to walk deeper:
+    /// `--under Breaking --under Abi` walks Upcoming → Breaking → Abi.
+    #[arg(long)]
+    under: Vec<String>,
   },
   /// Insert a new item under a subheading of the upcoming section
   InsertItem {
