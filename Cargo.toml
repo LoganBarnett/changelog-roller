@@ -33,8 +33,10 @@ toml = "1.1"
 # Error handling
 thiserror = "2.0"
 
-# Org-mode parsing and AST manipulation
-orgize = "0.9"
+# Org-mode parsing and AST manipulation.
+# Pinned to the fix-multiline-bracket-link branch so changelogs containing
+# links wrapped across lines parse correctly.
+orgize = { git = "ssh://git@github.com/LoganBarnett/orgize.git", branch = "fix-multiline-bracket-link" }
 
 # Shared library
 changelog-roller-lib = { path = "crates/lib" }

@@ -1,154 +1,100 @@
 use std::collections::HashSet;
 
-use orgize::{elements::Title, Headline, Org};
+use orgize::{
+  ast::{Headline, List},
+  rowan::{ast::AstNode, NodeOrToken, TextRange, TextSize},
+  Org, SyntaxKind, SyntaxNode,
+};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum RollError {
   #[error("No '{heading}' heading found in changelog")]
   UpcomingNotFound { heading: String },
-
-  #[error("Failed to modify changelog structure: {0}")]
-  StructureModification(String),
-
-  #[error("Failed to write rolled changelog output: {0}")]
-  OutputWrite(#[from] std::io::Error),
-
-  #[error("Rolled changelog output is not valid UTF-8: {0}")]
-  OutputEncoding(#[from] std::string::FromUtf8Error),
 }
 
-/// Returns `true` if the heading content (everything after `"** "`) has a
-/// `COMMENT` keyword, meaning the entire subtree is commented out in org-mode.
-fn is_comment_heading(heading_rest: &str) -> bool {
-  let s = heading_rest.trim();
-  s == "COMMENT" || s.starts_with("COMMENT ")
+/// Returns one entry per piece of "visible content" found beneath `node`:
+/// list items and prose paragraphs.  Structural nodes that orgize parses
+/// as their own kinds — property drawers, planning lines, keyword
+/// metadata, comments, blank lines — never match an arm here, so they
+/// fall through silently.  Sub-headlines carrying a `COMMENT` keyword or
+/// a `:noexport:` tag are skipped wholesale; other sub-headlines are
+/// recursed into.
+fn visible_content(node: &SyntaxNode) -> Vec<String> {
+  node
+    .children()
+    .flat_map(|child| match child.kind() {
+      SyntaxKind::HEADLINE => Headline::cast(child.clone())
+        .filter(|h| !h.is_commented() && !h.tags().any(|t| t == "noexport"))
+        .map(|_| visible_content(&child))
+        .unwrap_or_default(),
+      SyntaxKind::SECTION => visible_content(&child),
+      SyntaxKind::LIST => child
+        .children()
+        .filter(|c| c.kind() == SyntaxKind::LIST_ITEM)
+        .map(|item| item.to_string().trim_end().to_string())
+        .collect(),
+      SyntaxKind::PARAGRAPH => {
+        vec![child.to_string().trim_end().to_string()]
+      }
+      _ => Vec::new(),
+    })
+    .filter(|s| !s.is_empty())
+    .collect()
 }
 
-/// Returns `true` if the heading line carries a `:noexport:` tag, meaning
-/// the subtree is excluded from org export.
-fn has_noexport_tag(heading_rest: &str) -> bool {
-  heading_rest.contains(":noexport:")
-}
-
-/// Extracts the visible content lines from the upcoming section.
-///
-/// "Visible content" means lines that a reader would see as changelog entries:
-/// list items, plain text paragraphs.  Skipped are:
-/// - headings (used only for structure)
-/// - blank lines
-/// - property drawers (`:PROPERTIES:` … `:END:`)
-/// - org planning lines (`SCHEDULED:`, `DEADLINE:`, `CLOSED:`)
-/// - `#+KEYWORD:` metadata and `# comment` lines
-/// - entire subtrees under a `COMMENT` heading or a `:noexport:`-tagged heading
-///
-/// Returns an empty `Vec` when the upcoming heading is absent rather than an
-/// error, so callers can still do a diff even if one side of the comparison
-/// has no upcoming section at all.
-fn upcoming_content_lines(
+/// Returns the visible content entries under the upcoming section, or an
+/// empty `Vec` when the upcoming heading is absent — so callers can still
+/// diff even if one side has no upcoming section at all.
+fn upcoming_visible_content(
   org_text: &str,
   upcoming_heading: &str,
 ) -> Vec<String> {
-  let mut in_upcoming = false;
-  let mut upcoming_stars: usize = 0;
-  let mut in_drawer = false;
-  // Star level of the outermost active COMMENT/noexport exclusion, if any.
-  let mut excluded_at: Option<usize> = None;
-  let mut lines = Vec::new();
-
-  for line in org_text.lines() {
-    let trimmed = line.trim();
-
-    let star_count = line.chars().take_while(|&c| c == '*').count();
-    let is_heading = star_count > 0 && line[star_count..].starts_with(' ');
-
-    if is_heading {
-      // Headings always close any open property drawer.
-      in_drawer = false;
-
-      // A heading at the same or higher level exits any active exclusion.
-      if let Some(excl) = excluded_at {
-        if star_count <= excl {
-          excluded_at = None;
-        }
-      }
-
-      if !in_upcoming {
-        let title = line[star_count + 1..].trim();
-        if title == upcoming_heading {
-          in_upcoming = true;
-          upcoming_stars = star_count;
-        }
-      } else if star_count <= upcoming_stars {
-        // Leaving the upcoming section entirely.
-        break;
-      } else if excluded_at.is_none() {
-        // Inside upcoming — check if this sub-heading starts an exclusion.
-        let rest = &line[star_count + 1..];
-        if is_comment_heading(rest) || has_noexport_tag(rest) {
-          excluded_at = Some(star_count);
-        }
-      }
-      continue;
-    }
-
-    if !in_upcoming || excluded_at.is_some() {
-      continue;
-    }
-
-    // Property drawer boundaries.
-    if trimmed.eq_ignore_ascii_case(":PROPERTIES:")
-      || (trimmed.starts_with(':')
-        && trimmed.ends_with(':')
-        && trimmed.len() > 1
-        && !trimmed[1..trimmed.len() - 1].contains(' '))
-    {
-      in_drawer = true;
-      continue;
-    }
-    if trimmed.eq_ignore_ascii_case(":END:") {
-      in_drawer = false;
-      continue;
-    }
-    if in_drawer {
-      continue;
-    }
-
-    // Org planning lines, keyword metadata, and comment lines.
-    if trimmed.starts_with("SCHEDULED:")
-      || trimmed.starts_with("DEADLINE:")
-      || trimmed.starts_with("CLOSED:")
-      || trimmed.starts_with("#+")
-      || trimmed == "#"
-      || trimmed.starts_with("# ")
-    {
-      continue;
-    }
-
-    if !trimmed.is_empty() {
-      lines.push(line.to_string());
-    }
-  }
-
-  lines
+  let org = Org::parse(org_text);
+  find_upcoming(&org, upcoming_heading)
+    .map(|u| visible_content(u.syntax()))
+    .unwrap_or_default()
 }
 
-/// Returns `true` if `head_text` contains content lines under the upcoming
-/// section that are not present in `base_text`.
-///
-/// This is a PR-guard: it answers "did this branch add entries to Upcoming?"
-/// without caring whether Upcoming already had content in the base.
+/// Returns `true` if `head_text` contains visible-content entries under the
+/// upcoming section that are not present in `base_text`.
 pub fn has_upcoming_additions(
   base_text: &str,
   head_text: &str,
   upcoming_heading: &str,
 ) -> bool {
-  let base_lines: HashSet<String> =
-    upcoming_content_lines(base_text, upcoming_heading)
+  let base: HashSet<String> =
+    upcoming_visible_content(base_text, upcoming_heading)
       .into_iter()
       .collect();
-  let head_lines = upcoming_content_lines(head_text, upcoming_heading);
-  head_lines.iter().any(|l| !base_lines.contains(l))
+  upcoming_visible_content(head_text, upcoming_heading)
+    .iter()
+    .any(|l| !base.contains(l))
+}
+
+/// Locates the upcoming headline anywhere in the tree by exact-match of its
+/// raw title.  Returns `UpcomingNotFound` if no headline in the document
+/// has that title.
+fn find_upcoming(
+  org: &Org,
+  upcoming_heading: &str,
+) -> Result<Headline, RollError> {
+  fn search(headline: &Headline, target: &str) -> Option<Headline> {
+    if headline.title_raw().trim() == target {
+      return Some(headline.clone());
+    }
+    headline
+      .headlines()
+      .find_map(|child| search(&child, target))
+  }
+
+  org
+    .document()
+    .headlines()
+    .find_map(|top| search(&top, upcoming_heading))
+    .ok_or_else(|| RollError::UpcomingNotFound {
+      heading: upcoming_heading.to_string(),
+    })
 }
 
 /// Returns `true` if the upcoming section has at least one subsection with
@@ -163,16 +109,8 @@ pub fn is_ready_to_roll(
   upcoming_heading: &str,
 ) -> Result<bool, RollError> {
   let org = Org::parse(org_text);
-
-  let upcoming = org
-    .headlines()
-    .find(|h| h.title(&org).raw.as_ref() == upcoming_heading)
-    .ok_or_else(|| RollError::UpcomingNotFound {
-      heading: upcoming_heading.to_string(),
-    })?;
-
-  let ready = upcoming.children(&org).any(|c| c.section_node().is_some());
-  Ok(ready)
+  let upcoming = find_upcoming(&org, upcoming_heading)?;
+  Ok(upcoming.headlines().any(|h| h.section().is_some()))
 }
 
 /// Rolls a changelog forward by stamping the upcoming section as a new
@@ -187,87 +125,136 @@ pub fn roll(
   new_version: &str,
   upcoming_heading: &str,
 ) -> Result<String, RollError> {
-  let mut org = Org::parse_string(org_text);
+  let mut org = Org::parse(&org_text);
+  let upcoming = find_upcoming(&org, upcoming_heading)?;
 
-  let upcoming = org
-    .headlines()
-    .find(|h| h.title(&org).raw.as_ref() == upcoming_heading)
-    .ok_or_else(|| RollError::UpcomingNotFound {
-      heading: upcoming_heading.to_string(),
-    })?;
+  let stars = "*".repeat(upcoming.level());
+  let substars = "*".repeat(upcoming.level() + 1);
 
-  let upcoming_level = upcoming.level();
+  let subheadings: Vec<Headline> = upcoming.headlines().collect();
 
-  // Collect children before any mutation so borrows of `org` don't overlap
-  // with the mutable borrows required for tree surgery below.
-  let children: Vec<Headline> = upcoming.children(&org).collect();
-  let child_titles: Vec<String> = children
-    .iter()
-    .map(|c| c.title(&org).raw.to_string())
-    .collect();
-  let child_has_content: Vec<bool> = children
-    .iter()
-    .map(|c| c.section_node().is_some())
-    .collect();
-
-  // Detach every child so they can be rehomed.
-  for &child in &children {
-    child.detach(&mut org);
+  let mut fresh = format!("{} {}\n", stars, upcoming_heading);
+  for sub in &subheadings {
+    fresh.push_str(&format!("{} {}\n", substars, sub.title_raw().trim_end()));
   }
 
-  // Build the versioned heading; non-empty children carry their content into
-  // it.  Empty children are intentionally discarded — no empty sections in
-  // released versions.
-  let new_version_hl = Headline::new(
-    Title {
-      level: upcoming_level,
-      raw: String::from(new_version).into(),
-      ..Title::default()
-    },
-    &mut org,
-  );
-  for (i, &child) in children.iter().enumerate() {
-    if child_has_content[i] {
-      new_version_hl
-        .append(child, &mut org)
-        .map_err(|e| RollError::StructureModification(format!("{:?}", e)))?;
+  let mut versioned = format!("{} {}\n", stars, new_version);
+  for sub in &subheadings {
+    if sub.section().is_some() {
+      versioned.push_str(&sub.syntax().to_string());
     }
   }
 
-  // Build the fresh upcoming heading with all subsections recreated empty.
-  let new_upcoming_hl = Headline::new(
-    Title {
-      level: upcoming_level,
-      raw: String::from(upcoming_heading).into(),
-      ..Title::default()
-    },
-    &mut org,
-  );
-  for title in &child_titles {
-    let empty_child = Headline::new(
-      Title {
-        level: upcoming_level + 1,
-        raw: title.clone().into(),
-        ..Title::default()
-      },
-      &mut org,
-    );
-    new_upcoming_hl
-      .append(empty_child, &mut org)
-      .map_err(|e| RollError::StructureModification(format!("{:?}", e)))?;
+  let range = upcoming.syntax().text_range();
+  org.replace_range(range, format!("{}{}", fresh, versioned));
+
+  Ok(org.to_org())
+}
+
+/// Returns the end position of the last non-blank-line token within
+/// `node`'s subtree.  In particular this excludes trailing `BLANK_LINE`
+/// tokens but keeps the terminating `NEW_LINE` of a real content line —
+/// so inserting at the returned offset places new content immediately
+/// after the last real line and before any blank-line separator.
+fn last_content_end(node: &SyntaxNode) -> TextSize {
+  node
+    .descendants_with_tokens()
+    .filter_map(|nt| match nt {
+      NodeOrToken::Token(t) if t.kind() != SyntaxKind::BLANK_LINE => {
+        Some(t.text_range().end())
+      }
+      _ => None,
+    })
+    .last()
+    .unwrap_or_else(|| node.text_range().end())
+}
+
+/// Parses the leading numeric portion of an ordered-list bullet such as
+/// `"1. "`, `"42. "`, or `"3) "`.  Returns `None` for unordered bullets
+/// (`"- "`, `"+ "`, `"* "`) so a `filter_map` over mixed bullets yields
+/// only the numeric ones.
+fn bullet_number(bullet: &str) -> Option<u32> {
+  let digits: String =
+    bullet.chars().take_while(|c| c.is_ascii_digit()).collect();
+  digits.parse::<u32>().ok()
+}
+
+/// Inserts a new ordered-list item under a subheading of the upcoming
+/// section.  The item is appended after the last existing numbered entry,
+/// numbered as `<max + 1>`; if no numbered entries exist yet the new item
+/// is numbered `1`.  If the subheading does not exist under upcoming, it is
+/// created at the end of the upcoming span with the new item as its only
+/// content.
+///
+/// Heading matching is exact: `item_heading` must equal the subheading's
+/// raw title byte-for-byte (after trimming the trailing whitespace orgize
+/// includes on titles).  Only subheadings directly under `Upcoming` are
+/// considered; identically-named subheadings under versioned entries are
+/// left alone.
+pub fn insert_item(
+  org_text: String,
+  upcoming_heading: &str,
+  item_heading: &str,
+  body: &str,
+) -> Result<String, RollError> {
+  let mut org = Org::parse(&org_text);
+  let upcoming = find_upcoming(&org, upcoming_heading)?;
+
+  let existing = upcoming
+    .headlines()
+    .find(|h| h.title_raw().trim() == item_heading);
+
+  match existing {
+    Some(sub) => {
+      let list = sub
+        .section()
+        .and_then(|s| s.syntax().children().find_map(List::cast));
+
+      let (insert_offset, next_n) = match list {
+        Some(list) => {
+          let max_n = list
+            .items()
+            .filter_map(|item| bullet_number(item.bullet().as_ref()))
+            .max()
+            .unwrap_or(0);
+          (list.syntax().text_range().end(), max_n + 1)
+        }
+        None => (sub.syntax().text_range().end(), 1),
+      };
+
+      let new_item = format!("{}. {}\n", next_n, body);
+      org
+        .replace_range(TextRange::new(insert_offset, insert_offset), &new_item);
+    }
+    None => {
+      let substars = "*".repeat(upcoming.level() + 1);
+      let new_block = format!("{} {}\n1. {}\n", substars, item_heading, body);
+
+      // If upcoming already has sub-headlines, replace the last one's full
+      // text with (its content up to the last non-blank line + the new
+      // sub-headline block + its trailing blank lines).  Splicing inside
+      // a single headline triggers orgize's per-headline reparse, which
+      // can lose sibling content; expanding the range to cover the whole
+      // sub-headline forces the multi-headline full-document reparse path.
+      let subs: Vec<Headline> = upcoming.headlines().collect();
+      match subs.last() {
+        Some(last) => {
+          let last_range = last.syntax().text_range();
+          let last_text = last.syntax().to_string();
+          let split_at: usize =
+            (last_content_end(last.syntax()) - last_range.start()).into();
+          let mut new_text = last_text[..split_at].to_string();
+          new_text.push_str(&new_block);
+          new_text.push_str(&last_text[split_at..]);
+          org.replace_range(last_range, new_text);
+        }
+        None => {
+          let end = upcoming.syntax().text_range().end();
+          org.replace_range(TextRange::new(end, end), &new_block);
+        }
+      }
+    }
   }
 
-  // Splice both new headings into the document at the old upcoming's position,
-  // then remove the now-empty old upcoming.
-  upcoming
-    .insert_before(new_upcoming_hl, &mut org)
-    .map_err(|e| RollError::StructureModification(format!("{:?}", e)))?;
-  new_upcoming_hl
-    .insert_after(new_version_hl, &mut org)
-    .map_err(|e| RollError::StructureModification(format!("{:?}", e)))?;
-  upcoming.detach(&mut org);
-
-  let mut output: Vec<u8> = Vec::new();
-  org.write_org(&mut output)?;
-  Ok(String::from_utf8(output)?)
+  Ok(org.to_org())
 }

@@ -39,8 +39,8 @@ Assume a ~CHANGELOG.org~ document like this:
 ,*** Fixes
 #+end_src
 
-Then run ~changelog-roller --input-file CHANGELOG.org --add-version v0.2.0~ and
-observe the new document:
+Then run ~changelog-roller roll --version v0.2.0~ (which reads
+~CHANGELOG.org~ by default) and observe the new document:
 
 #+begin_src org :results none :exports code
 ,* changelog
@@ -59,3 +59,33 @@ observe the new document:
 1. Lots of new features!
 ,*** Fixes
 #+end_src
+
+* Adding entries
+
+To add a new entry to the upcoming section without hand-editing the file,
+use the ~insert-item~ subcommand:
+
+#+begin_src sh :results none :exports code
+changelog-roller --in-place insert-item \
+  --heading Additions \
+  --body "Added shiny new thing"
+#+end_src
+
+If the named heading already exists under ~Upcoming~, the new entry is
+appended to its numbered list as the next item.  If it does not exist, the
+heading is created and the entry becomes its first list item.  Headings
+are matched by exact string, so ~Fix~ and ~Fixes~ are different headings.
+
+* Subcommands
+
+- ~roll --version <V>~ — stamp ~Upcoming~ as version ~V~ and start a fresh
+  upcoming section.
+- ~insert-item --heading <H> --body <B>~ — add an entry under heading ~H~
+  in the upcoming section.
+- ~ready-to-roll~ — exit non-zero if the upcoming section has no content;
+  useful as a CI gate.
+- ~check-additions --base <REF>~ — exit non-zero if no new entries have
+  been added to the upcoming section relative to a git ref.
+
+Without ~--in-place~, ~roll~ and ~insert-item~ write the updated changelog
+to stdout.

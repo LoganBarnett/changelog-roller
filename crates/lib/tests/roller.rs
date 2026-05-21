@@ -1,17 +1,25 @@
 use changelog_roller_lib::{
-  has_upcoming_additions, is_ready_to_roll, roll, RollError,
+  has_upcoming_additions, insert_item, is_ready_to_roll, roll, RollError,
 };
-use orgize::Org;
+use orgize::{ast::Headline, Org};
 
-// Returns the immediate child headline titles for the first headline whose
-// title matches `parent_title`.
+// Recursively searches the document for the first headline whose raw title
+// matches `target`, returning its immediate child headlines' titles.
 fn child_titles(org: &Org, parent_title: &str) -> Vec<String> {
+  fn search(h: Headline, target: &str) -> Option<Headline> {
+    if h.title_raw().trim() == target {
+      return Some(h);
+    }
+    h.headlines().find_map(|c| search(c, target))
+  }
+
   org
+    .document()
     .headlines()
-    .find(|h| h.title(org).raw.as_ref() == parent_title)
+    .find_map(|h| search(h, parent_title))
     .map(|h| {
-      h.children(org)
-        .map(|c| c.title(org).raw.to_string())
+      h.headlines()
+        .map(|c| c.title_raw().trim().to_string())
         .collect()
     })
     .unwrap_or_default()
@@ -60,16 +68,23 @@ fn new_upcoming_subsections_are_empty() {
     // new Upcoming, one potentially in the versioned entry).  We only care
     // that the children of the new Upcoming are empty; the version entry is
     // tested separately.
+    fn find(h: Headline, target: &str) -> Option<Headline> {
+      if h.title_raw().trim() == target {
+        return Some(h);
+      }
+      h.headlines().find_map(|c| find(c, target))
+    }
     let upcoming = org
+      .document()
       .headlines()
-      .find(|h| h.title(&org).raw.as_ref() == "Upcoming")
+      .find_map(|h| find(h, "Upcoming"))
       .unwrap();
     let child = upcoming
-      .children(&org)
-      .find(|c| c.title(&org).raw.as_ref() == *title);
+      .headlines()
+      .find(|c| c.title_raw().trim() == *title);
     assert!(child.is_some(), "new Upcoming missing subsection '{}'", title);
     assert!(
-      child.unwrap().section_node().is_none(),
+      child.unwrap().section().is_none(),
       "new Upcoming's '{}' subsection must be empty",
       title
     );
@@ -399,4 +414,237 @@ fn diff_range_respects_custom_upcoming_heading() {
   assert!(has_upcoming_additions(base, head, "Next"));
   // "Upcoming" is absent in both — no additions under that name.
   assert!(!has_upcoming_additions(base, head, "Upcoming"));
+}
+
+// ============================================================================
+// insert_item
+// ============================================================================
+
+#[test]
+fn insert_item_appends_next_number_to_existing_list() {
+  let input = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Additions\n",
+    "1. First thing\n",
+    "*** Fixes\n",
+  );
+  let result =
+    insert_item(input.to_string(), "Upcoming", "Additions", "Second thing")
+      .unwrap();
+  assert_eq!(
+    result,
+    concat!(
+      "* changelog\n",
+      "** Upcoming\n",
+      "*** Additions\n",
+      "1. First thing\n",
+      "2. Second thing\n",
+      "*** Fixes\n",
+    )
+  );
+}
+
+#[test]
+fn insert_item_starts_at_one_when_section_empty() {
+  let input = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Additions\n",
+    "*** Fixes\n",
+  );
+  let result =
+    insert_item(input.to_string(), "Upcoming", "Additions", "New thing")
+      .unwrap();
+  assert_eq!(
+    result,
+    concat!(
+      "* changelog\n",
+      "** Upcoming\n",
+      "*** Additions\n",
+      "1. New thing\n",
+      "*** Fixes\n",
+    )
+  );
+}
+
+#[test]
+fn insert_item_creates_missing_subheading() {
+  let input = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Additions\n",
+    "** v0.1.0\n",
+  );
+  let result =
+    insert_item(input.to_string(), "Upcoming", "Breaking", "Removed shiny")
+      .unwrap();
+  assert_eq!(
+    result,
+    concat!(
+      "* changelog\n",
+      "** Upcoming\n",
+      "*** Additions\n",
+      "*** Breaking\n",
+      "1. Removed shiny\n",
+      "** v0.1.0\n",
+    )
+  );
+}
+
+#[test]
+fn insert_item_creates_subheading_at_eof_when_upcoming_is_last_section() {
+  let input = "* changelog\n** Upcoming\n*** Additions\n";
+  let result =
+    insert_item(input.to_string(), "Upcoming", "Fixes", "Fixed thing").unwrap();
+  assert_eq!(
+    result,
+    concat!(
+      "* changelog\n",
+      "** Upcoming\n",
+      "*** Additions\n",
+      "*** Fixes\n",
+      "1. Fixed thing\n",
+    )
+  );
+}
+
+#[test]
+fn insert_item_preserves_blank_line_separator_when_creating_subheading() {
+  let input = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Additions\n",
+    "1. Already here\n",
+    "\n",
+    "** v0.1.0\n",
+  );
+  let result =
+    insert_item(input.to_string(), "Upcoming", "Fixes", "Fixed thing").unwrap();
+  assert_eq!(
+    result,
+    concat!(
+      "* changelog\n",
+      "** Upcoming\n",
+      "*** Additions\n",
+      "1. Already here\n",
+      "*** Fixes\n",
+      "1. Fixed thing\n",
+      "\n",
+      "** v0.1.0\n",
+    )
+  );
+}
+
+#[test]
+fn insert_item_returns_error_when_upcoming_missing() {
+  let input = "* changelog\n** v0.1.0\n*** Additions\n1. Initial\n";
+  let err = insert_item(input.to_string(), "Upcoming", "Additions", "Body")
+    .unwrap_err();
+  assert!(
+    matches!(err, RollError::UpcomingNotFound { .. }),
+    "expected UpcomingNotFound, got: {:?}",
+    err
+  );
+}
+
+#[test]
+fn insert_item_does_not_touch_versioned_section_with_same_name() {
+  // Both Upcoming and v0.1.0 have an "Additions" subheading.  Inserting
+  // into "Additions" must target the one under Upcoming.
+  let input = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Additions\n",
+    "** v0.1.0\n",
+    "*** Additions\n",
+    "1. Initial release\n",
+  );
+  let result =
+    insert_item(input.to_string(), "Upcoming", "Additions", "New thing")
+      .unwrap();
+  assert_eq!(
+    result,
+    concat!(
+      "* changelog\n",
+      "** Upcoming\n",
+      "*** Additions\n",
+      "1. New thing\n",
+      "** v0.1.0\n",
+      "*** Additions\n",
+      "1. Initial release\n",
+    )
+  );
+}
+
+#[test]
+fn insert_item_heading_match_is_exact() {
+  // "Fix" must not match "Fixes" — they are different headings, so a new
+  // "Fix" subheading should be created.
+  let input = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Fixes\n",
+    "1. Fixed something\n",
+  );
+  let result =
+    insert_item(input.to_string(), "Upcoming", "Fix", "Different category")
+      .unwrap();
+  assert_eq!(
+    result,
+    concat!(
+      "* changelog\n",
+      "** Upcoming\n",
+      "*** Fixes\n",
+      "1. Fixed something\n",
+      "*** Fix\n",
+      "1. Different category\n",
+    )
+  );
+}
+
+#[test]
+fn insert_item_does_not_renumber_existing_items() {
+  // If the existing list has unusual numbering, we still just use max+1.
+  let input = concat!(
+    "* changelog\n",
+    "** Upcoming\n",
+    "*** Additions\n",
+    "1. First\n",
+    "1. Second (typo)\n",
+    "1. Third (typo)\n",
+  );
+  let result =
+    insert_item(input.to_string(), "Upcoming", "Additions", "Fourth").unwrap();
+  // max numbered value is 1, so new item is 2 — and the typos are left as-is.
+  assert_eq!(
+    result,
+    concat!(
+      "* changelog\n",
+      "** Upcoming\n",
+      "*** Additions\n",
+      "1. First\n",
+      "1. Second (typo)\n",
+      "1. Third (typo)\n",
+      "2. Fourth\n",
+    )
+  );
+}
+
+#[test]
+fn insert_item_respects_custom_upcoming_heading() {
+  let input =
+    concat!("* changelog\n", "** Next\n", "*** Additions\n", "** v0.1.0\n",);
+  let result =
+    insert_item(input.to_string(), "Next", "Additions", "New thing").unwrap();
+  assert_eq!(
+    result,
+    concat!(
+      "* changelog\n",
+      "** Next\n",
+      "*** Additions\n",
+      "1. New thing\n",
+      "** v0.1.0\n",
+    )
+  );
 }

@@ -1,5 +1,5 @@
 use changelog_roller_lib::{LogFormat, LogLevel};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use serde::Deserialize;
 use std::path::PathBuf;
 use thiserror::Error;
@@ -30,41 +30,58 @@ pub enum ConfigError {
 #[command(author, version, about, long_about = None)]
 pub struct CliRaw {
   /// Log level (trace, debug, info, warn, error)
-  #[arg(long, env = "LOG_LEVEL")]
+  #[arg(long, env = "LOG_LEVEL", global = true)]
   pub log_level: Option<String>,
 
   /// Log format (text, json)
-  #[arg(long, env = "LOG_FORMAT")]
+  #[arg(long, env = "LOG_FORMAT", global = true)]
   pub log_format: Option<String>,
 
   /// Path to configuration file
-  #[arg(short, long, env = "CONFIG_FILE")]
+  #[arg(short, long, env = "CONFIG_FILE", global = true)]
   pub config: Option<PathBuf>,
 
-  /// Input CHANGELOG file to process
-  #[arg(short, long, env = "INPUT_FILE")]
+  /// Input CHANGELOG file to process (defaults to CHANGELOG.org)
+  #[arg(short, long, env = "INPUT_FILE", global = true)]
   pub input_file: Option<PathBuf>,
 
   /// Modify the input file in place rather than writing to stdout
-  #[arg(long)]
+  #[arg(long, global = true)]
   pub in_place: bool,
 
-  /// New version string to stamp on the upcoming section (e.g. v0.2.0)
-  #[arg(long, env = "ADD_VERSION")]
-  pub add_version: Option<String>,
-
   /// Name of the heading that accumulates unreleased changes
-  #[arg(long, env = "UPCOMING_HEADING")]
+  #[arg(long, env = "UPCOMING_HEADING", global = true)]
   pub upcoming_heading: Option<String>,
 
-  /// Exit non-zero if the upcoming section has no changes; useful as a CI gate
-  #[arg(long)]
-  pub ready_to_roll: bool,
+  #[command(subcommand)]
+  pub command: CliCommand,
+}
 
-  /// Git ref to diff against (e.g. origin/main); exit non-zero if no new
-  /// entries were added to the upcoming section relative to that ref
-  #[arg(long, env = "DIFF_RANGE")]
-  pub diff_range: Option<String>,
+#[derive(Debug, Subcommand)]
+pub enum CliCommand {
+  /// Stamp the upcoming section as a new version and start a fresh upcoming
+  Roll {
+    /// New version string to stamp on the upcoming section (e.g. v0.2.0)
+    #[arg(long)]
+    version: String,
+  },
+  /// Exit non-zero if the upcoming section has no changes; useful as a CI gate
+  ReadyToRoll,
+  /// Exit non-zero if no new entries were added relative to a git ref
+  CheckAdditions {
+    /// Git ref to diff against (e.g. origin/main)
+    #[arg(long)]
+    base: String,
+  },
+  /// Insert a new item under a subheading of the upcoming section
+  InsertItem {
+    /// Subheading under upcoming to insert into (e.g. "Addition", "Fix")
+    #[arg(long)]
+    heading: String,
+    /// Body text of the new list item
+    #[arg(long)]
+    body: String,
+  },
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -95,12 +112,10 @@ impl ConfigFileRaw {
 pub struct Config {
   pub log_level: LogLevel,
   pub log_format: LogFormat,
-  pub input_file: Option<PathBuf>,
+  pub input_file: PathBuf,
   pub in_place: bool,
-  pub add_version: Option<String>,
   pub upcoming_heading: String,
-  pub ready_to_roll: bool,
-  pub diff_range: Option<String>,
+  pub command: CliCommand,
 }
 
 impl Config {
@@ -130,7 +145,10 @@ impl Config {
       .parse::<LogFormat>()
       .map_err(|e| ConfigError::Validation(e.to_string()))?;
 
-    let input_file = cli.input_file.or(config_file.input_file);
+    let input_file = cli
+      .input_file
+      .or(config_file.input_file)
+      .unwrap_or_else(|| PathBuf::from("CHANGELOG.org"));
 
     let upcoming_heading = cli
       .upcoming_heading
@@ -142,10 +160,8 @@ impl Config {
       log_format,
       input_file,
       in_place: cli.in_place,
-      add_version: cli.add_version,
       upcoming_heading,
-      ready_to_roll: cli.ready_to_roll,
-      diff_range: cli.diff_range,
+      command: cli.command,
     })
   }
 }
