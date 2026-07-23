@@ -13,6 +13,7 @@ use std::{
 };
 
 use thiserror::Error;
+use tracing::warn;
 
 use crate::roller::{self, has_section_additions, is_ready_to_roll, RollError};
 
@@ -94,22 +95,57 @@ fn write_changelog(path: &Path, content: &str) -> Result<(), OperationError> {
   })
 }
 
-fn git_show_file(git_ref: &str, path: &Path) -> Result<String, OperationError> {
+/// Reports whether `git_ref` resolves to a commit in the current repo.
+/// Used to tell "the ref exists but predates the changelog" (a bootstrap
+/// situation we tolerate) apart from "the ref itself is unresolvable" (a
+/// real misconfiguration we surface).  `git show`'s own stderr wording
+/// varies with whether the path happens to exist in the working tree, so
+/// it is not a reliable signal for this distinction; a dedicated
+/// `rev-parse` is.
+fn git_ref_resolves(git_ref: &str) -> Result<bool, OperationError> {
+  let output = Command::new("git")
+    .args([
+      "rev-parse",
+      "--verify",
+      "--quiet",
+      &format!("{}^{{commit}}", git_ref),
+    ])
+    .output()
+    .map_err(OperationError::GitRun)?;
+  Ok(output.status.success())
+}
+
+/// Reads `path` as it exists at `git_ref`.  Returns `Ok(None)` when the
+/// ref resolves but does not contain the file — the bootstrap case where
+/// the destination branch predates the changelog — so callers can treat
+/// the baseline as empty instead of failing.  A ref that does not resolve
+/// at all is a genuine error and is surfaced as [`OperationError::GitShow`].
+fn git_show_file_at_ref(
+  git_ref: &str,
+  path: &Path,
+) -> Result<Option<String>, OperationError> {
   let path_str = path.to_string_lossy().into_owned();
   let output = Command::new("git")
     .args(["show", &format!("{}:{}", git_ref, path_str)])
     .output()
     .map_err(OperationError::GitRun)?;
 
-  if !output.status.success() {
-    return Err(OperationError::GitShow {
+  if output.status.success() {
+    Ok(Some(String::from_utf8(output.stdout)?))
+  } else if git_ref_resolves(git_ref)? {
+    // `git show` failed against a ref that does resolve, so within this
+    // tool's remit the file is simply absent at that ref — the bootstrap
+    // situation — and the baseline is reported as empty.
+    Ok(None)
+  } else {
+    // The ref itself does not resolve, which is a real misconfiguration
+    // rather than a missing file; surface the original git error.
+    Err(OperationError::GitShow {
       git_ref: git_ref.to_string(),
       path: path_str,
       stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    });
+    })
   }
-
-  Ok(String::from_utf8(output.stdout)?)
 }
 
 /// Decides whether to write the mutated changelog back to `input` or hand
@@ -150,13 +186,30 @@ pub fn ready_to_roll(
 /// section at `path`.  Callers choose the path; the conventional value
 /// is `[upcoming_heading]` (optionally followed by drill-down segments),
 /// but nothing here enforces that.
+///
+/// When `base_ref` resolves but does not yet contain the changelog file —
+/// the bootstrap case where the destination branch predates the changelog
+/// — the baseline is treated as empty rather than an error.  The check
+/// then reduces to "does the source branch carry entries under `path`",
+/// so the very first PR that introduces the changelog can pass the gate
+/// without a direct-to-main seed push.
 pub fn check_additions(
   input: &Path,
   base_ref: &str,
   path: &[String],
 ) -> Result<CheckAdditionsOutcome, OperationError> {
   let head_content = read_changelog(input)?;
-  let base_content = git_show_file(base_ref, input)?;
+  let base_content =
+    git_show_file_at_ref(base_ref, input)?.unwrap_or_else(|| {
+      warn!(
+        "No changelog at '{}' in base ref '{}'; treating the baseline as \
+         empty and checking the source branch's entries directly \
+         (changelog bootstrap)",
+        input.display(),
+        base_ref,
+      );
+      String::new()
+    });
   if has_section_additions(&base_content, &head_content, path) {
     Ok(CheckAdditionsOutcome::HasAdditions)
   } else {
